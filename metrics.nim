@@ -1224,6 +1224,92 @@ when defined(metrics) and defined(linux):
     except CatchableError as e:
       printError(e.msg)
 
+when defined(metrics) and defined(macosx):
+  from posix import getrlimit, Rlimit, RLIMIT_NOFILE
+
+  type
+    MachTimeValue {.importc: "time_value_t", header: "<mach/mach.h>".} = object
+      seconds: cint
+      microseconds: cint
+
+    MachTaskBasicInfo {.importc: "struct mach_task_basic_info",
+        header: "<mach/mach.h>".} = object
+      virtual_size: uint64
+      resident_size: uint64
+      resident_size_max: uint64
+      user_time: MachTimeValue
+      system_time: MachTimeValue
+      policy: cint
+      suspend_count: cint
+
+  proc mach_task_self_fun(): cuint {.importc: "mach_task_self", header: "<mach/mach.h>".}
+  proc task_info_fun(
+      target: cuint,
+      flavor: cuint,
+      taskInfoOut: pointer,
+      count: ptr cuint,
+  ): cint {.importc: "task_info", header: "<mach/mach.h>".}
+
+  const
+    MACH_TASK_BASIC_INFO_FLAVOR = 20.cuint
+    MACH_TASK_BASIC_INFO_COUNT = 12.cuint
+      # sizeof(mach_task_basic_info_data_t) / sizeof(natural_t) = 48 / 4
+    KERN_SUCCESS_VAL = 0.cint
+
+  type ProcessInfo = ref object of Gauge
+  var
+    processInfo* {.global.} =
+      ProcessInfo.newCollector("process_info", "CPU and memory usage")
+
+  method collect*(collector: ProcessInfo, output: MetricHandler) =
+    let timestamp = collector.now()
+
+    try:
+      var info: MachTaskBasicInfo
+      var count = MACH_TASK_BASIC_INFO_COUNT
+      let kr = task_info_fun(
+        mach_task_self_fun(), MACH_TASK_BASIC_INFO_FLAVOR, addr info, addr count
+      )
+      if kr == KERN_SUCCESS_VAL:
+        output(
+          name = "process_virtual_memory_bytes", # Virtual memory size in bytes.
+          value = info.virtual_size.float64,
+          timestamp = timestamp,
+        )
+
+        output(
+          name = "process_resident_memory_bytes", # Resident memory size in bytes.
+          value = info.resident_size.float64,
+          timestamp = timestamp,
+        )
+
+        output(
+          name = "process_cpu_seconds_total",
+            # Total user and system CPU time spent in seconds.
+          value =
+            info.user_time.seconds.float64 +
+            info.user_time.microseconds.float64 / 1_000_000.0 +
+            info.system_time.seconds.float64 +
+            info.system_time.microseconds.float64 / 1_000_000.0,
+          timestamp = timestamp,
+        )
+
+      var rlim: Rlimit
+      if getrlimit(RLIMIT_NOFILE, rlim) == 0:
+        output(
+          name = "process_max_fds", # Maximum number of open file descriptors.
+          value = rlim.rlim_cur.float64,
+          timestamp = timestamp,
+        )
+
+      output(
+        name = "process_open_fds", # Number of open file descriptors.
+        value = toSeq(walkDir("/dev/fd")).len.float64,
+        timestamp = timestamp,
+      )
+    except CatchableError as e:
+      printError(e.msg)
+
 ####################
 # Nim runtime info #
 ####################
